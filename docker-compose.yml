@@ -1,0 +1,110 @@
+x-traefik-common-labels: &traefik_common_labels
+  traefik.enable: "true"
+  traefik.docker.network: "${TRAEFIK_NETWORK:-forgejo-traefik}"
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    container_name: forgejo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-forgejo}
+      POSTGRES_USER: ${POSTGRES_USER:-forgejo}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - ${PROJECT_DIR:-.}/postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      - forgejo-net
+
+  forgejo:
+    image: ${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo:11}
+    container_name: forgejo
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database
+      GITEA__database__DB_TYPE: postgres
+      GITEA__database__HOST: postgres:5432
+      GITEA__database__NAME: ${POSTGRES_DB:-forgejo}
+      GITEA__database__USER: ${POSTGRES_USER:-forgejo}
+      GITEA__database__PASSWD: /run/secrets/postgres_password
+      # Server
+      GITEA__server__ROOT_URL: https://${FORGEJO_DOMAIN}/
+      GITEA__server__DOMAIN: ${FORGEJO_DOMAIN}
+      GITEA__server__SSH_DOMAIN: ${FORGEJO_SSH_DOMAIN:-${FORGEJO_DOMAIN}}
+      GITEA__server__SSH_PORT: ${FORGEJO_SSH_PORT:-22}
+      GITEA__server__SSH_LISTEN_PORT: 22
+      # Security
+      GITEA__security__SECRET_KEY_FILE: /run/secrets/forgejo_secret_key
+      GITEA__security__INTERNAL_TOKEN_FILE: /run/secrets/forgejo_internal_token
+      GITEA__security__INSTALL_LOCK: "true"
+      # Service
+      GITEA__service__DISABLE_REGISTRATION: ${FORGEJO_DISABLE_REGISTRATION:-true}
+      # Optional: OpenID/SSO via Authentik
+      GITEA__openid__ENABLE_OPENID_SIGNIN: ${FORGEJO_OPENID_SIGNIN:-false}
+      GITEA__openid__ENABLE_OPENID_SIGNUP: ${FORGEJO_OPENID_SIGNUP:-false}
+      # Logging
+      GITEA__log__LEVEL: ${FORGEJO_LOG_LEVEL:-Info}
+    secrets:
+      - postgres_password
+      - forgejo_secret_key
+      - forgejo_internal_token
+    volumes:
+      - ${PROJECT_DIR:-.}/forgejo-data:/var/lib/gitea
+      - ${PROJECT_DIR:-.}/forgejo-config:/etc/gitea
+    labels:
+      <<: *traefik_common_labels
+      traefik.http.routers.forgejo.entrypoints: "websecure"
+      traefik.http.routers.forgejo.rule: "Host(`${FORGEJO_DOMAIN}`)"
+      traefik.http.routers.forgejo.tls: "true"
+      traefik.http.routers.forgejo.tls.certresolver: "${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      traefik.http.routers.forgejo.middlewares: "${TRAEFIK_MIDDLEWARES:-}"
+      traefik.http.services.forgejo.loadbalancer.server.port: "3000"
+    networks:
+      - forgejo-net
+      - traefik
+
+  # SSH passthrough via Traefik TCP router (optional)
+  forgejo-ssh:
+    image: ${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo:11}
+    container_name: forgejo-ssh
+    restart: unless-stopped
+    profiles:
+      - ssh-traefik
+    command: ["/usr/sbin/sshd", "-D", "-e"]
+    volumes:
+      - ${PROJECT_DIR:-.}/forgejo-data:/var/lib/gitea
+      - ${PROJECT_DIR:-.}/forgejo-config:/etc/gitea
+    labels:
+      <<: *traefik_common_labels
+      traefik.tcp.routers.forgejo-ssh.entrypoints: "ssh"
+      traefik.tcp.routers.forgejo-ssh.rule: "HostSNI(`*`)"
+      traefik.tcp.routers.forgejo-ssh.service: forgejo-ssh
+      traefik.tcp.services.forgejo-ssh.loadbalancer.server.port: "22"
+    networks:
+      - forgejo-net
+      - traefik
+
+secrets:
+  postgres_password:
+    file: ${SECRETS_DIR:-./secrets}/postgres_password.txt
+  forgejo_secret_key:
+    file: ${SECRETS_DIR:-./secrets}/forgejo_secret_key.txt
+  forgejo_internal_token:
+    file: ${SECRETS_DIR:-./secrets}/forgejo_internal_token.txt
+
+networks:
+  forgejo-net:
+  traefik:
+    external: ${TRAEFIK_EXTERNAL:-true}
+    name: ${TRAEFIK_NETWORK:-forgejo-traefik}

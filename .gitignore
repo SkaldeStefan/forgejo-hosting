@@ -1,0 +1,20 @@
+# Secrets
+secrets/
+.env
+
+# Data directories
+postgres-data/
+forgejo-data/
+forgejo-config/
+
+# Backups
+backups/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
