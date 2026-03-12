@@ -1,10 +1,56 @@
 #!/usr/bin/env bash
-# install.sh - Deploy Forgejo hosting to production location
-# Usage: ./install.sh [INSTANCE_KEY]
 #
-# Creates:
-#   /srv/docker/${INSTANCE_KEY}/       - docker-compose.yml, .env, data directories
-#   /etc/docker-secrets/${INSTANCE_KEY}/ - secret files
+# =============================================================================
+# install.sh - Deployment-Script für Forgejo-Hosting
+# =============================================================================
+#
+# AUFGABE:
+#   Dieses Script deployt das Forgejo-Hosting-Projekt aus dem Repository in
+#   produktive Verzeichnisse auf dem Zielsystem. Es trennt dabei strikt zwischen
+#   Konfiguration und Secrets.
+#
+# FUNKTIONSWEISE:
+#   1. Erstellt Zielverzeichnisse für Installation und Secrets
+#   2. Kopiert docker-compose.yml und Scripts ins Installationsverzeichnis
+#   3. Generiert eine .env-Datei durch Merge von:
+#      - .env.defaults (Standardwerte aus dem Repo)
+#      - .env.local (lokale Overrides, nicht in Git)
+#   4. Generiert Secrets (falls noch nicht vorhanden):
+#      - PostgreSQL-Passwort
+#      - Forgejo Secret Key
+#      - Forgejo Internal Token
+#
+# VERZEICHNISSTRUKTUR NACH INSTALLATION:
+#
+#   /srv/docker/${INSTANCE_KEY}/
+#   ├── docker-compose.yml       # Container-Definition
+#   ├── .env                     # Generierte Konfiguration (ohne Secrets)
+#   ├── scripts/                 # Backup/Restore-Scripts
+#   ├── postgres-data/           # PostgreSQL-Daten (Docker Volume)
+#   ├── forgejo-data/            # Forgejo-Daten (Repos, etc.)
+#   ├── forgejo-config/          # Forgejo-Konfiguration
+#   └── backups/                 # Backup-Ablage
+#
+#   /etc/docker-secrets/${INSTANCE_KEY}/
+#   ├── postgres_password.txt    # PostgreSQL-Passwort
+#   ├── forgejo_secret_key.txt   # Forgejo Verschlüsselungsschlüssel
+#   └── forgejo_internal_token.txt # Internes API-Token
+#
+# VERWENDUNG:
+#   sudo ./install.sh                      # Standard: INSTANCE_KEY=forgejo-git
+#   sudo ./install.sh mein-forgejo         # Benutzerdefinierter INSTANCE_KEY
+#   INSTALL_DIR=/opt/forgejo ./install.sh  # Benutzerdefiniertes Installationsverzeichnis
+#
+# INSTANCE_KEY:
+#   Erlaubt mehrere parallele Installationen auf demselben Host.
+#   Jede Instanz erhält eigene Verzeichnisse und Secrets.
+#
+# VORAUSSETZUNGEN:
+#   - Docker & Docker Compose
+#   - Traefik-Proxy (externes Netzwerk)
+#   - Root-Rechte oder sudo
+#
+# =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
