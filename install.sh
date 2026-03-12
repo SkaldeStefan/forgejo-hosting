@@ -37,9 +37,14 @@
 #   └── forgejo_internal_token.txt # Internes API-Token
 #
 # VERWENDUNG:
-#   sudo ./install.sh                      # Standard: INSTANCE_KEY=forgejo-git
-#   sudo ./install.sh mein-forgejo         # Benutzerdefinierter INSTANCE_KEY
+#   ./install.sh                           # Standard: INSTANCE_KEY=forgejo-git
+#   ./install.sh mein-forgejo              # Benutzerdefinierter INSTANCE_KEY
 #   INSTALL_DIR=/opt/forgejo ./install.sh  # Benutzerdefiniertes Installationsverzeichnis
+#
+# SUDO:
+#   Das Script verwendet sudo nur dort, wo es benötigt wird (z.B. für /srv/docker/
+#   oder /etc/docker-secrets/). Wenn die Zielverzeichnisse ohne sudo beschreibbar
+#   sind, läuft das Script ohne sudo.
 #
 # INSTANCE_KEY:
 #   Erlaubt mehrere parallele Installationen auf demselben Host.
@@ -48,7 +53,7 @@
 # VORAUSSETZUNGEN:
 #   - Docker & Docker Compose
 #   - Traefik-Proxy (externes Netzwerk)
-#   - Root-Rechte oder sudo
+#   - sudo (falls Zielverzeichnisse Root gehören)
 #
 # =============================================================================
 set -euo pipefail
@@ -72,15 +77,61 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-check_sudo() {
-  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    if command -v sudo >/dev/null 2>&1; then
-      log_info "Re-executing with sudo..."
-      exec sudo -E INSTALL_DIR="$INSTALL_DIR" SECRETS_DIR="$SECRETS_DIR" "$0" "$@"
-    else
-      log_error "This script must be run as root or with sudo."
+# Detect if sudo is needed for a path
+needs_sudo_for_path() {
+  local path="$1"
+  local parent_dir
+  parent_dir="$(dirname "$path")"
+
+  # Check if parent directory exists and is writable
+  if [ -d "$parent_dir" ]; then
+    [ ! -w "$parent_dir" ]
+  elif [ -d "$path" ]; then
+    [ ! -w "$path" ]
+  else
+    # Parent doesn't exist, check grandparent recursively
+    needs_sudo_for_path "$parent_dir"
+  fi
+}
+
+# Initialize SUDO variable based on what's needed
+init_sudo() {
+  SUDO=""
+
+  # Check if we need sudo for install directory
+  if needs_sudo_for_path "$INSTALL_DIR"; then
+    SUDO="sudo"
+  fi
+
+  # Check if we need sudo for secrets directory
+  if needs_sudo_for_path "$SECRETS_DIR"; then
+    SUDO="sudo"
+  fi
+
+  # Check if we need sudo for docker
+  if ! docker info &>/dev/null; then
+    SUDO="sudo"
+  fi
+
+  if [ -n "$SUDO" ]; then
+    # Verify sudo is available
+    if ! command -v sudo >/dev/null 2>&1; then
+      log_error "sudo required but not available."
       exit 1
     fi
+    # Test sudo access
+    if ! sudo -n true 2>/dev/null; then
+      log_info "sudo required for some operations. You may be prompted for password."
+    fi
+  fi
+}
+
+# Run command with sudo if needed
+run_sudo() {
+  if [ -n "$SUDO" ]; then
+    sudo "$@"
+  else
+    "$@"
   fi
 }
 
@@ -88,7 +139,7 @@ check_dependencies() {
   local missing=()
 
   command -v docker >/dev/null 2>&1 || missing+=("docker")
-  command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || missing+=("docker compose (plugin)")
+  command -v docker >/dev/null 2>&1 && (docker compose version >/dev/null 2>&1 || $SUDO docker compose version >/dev/null 2>&1) || missing+=("docker compose (plugin)")
 
   if [ ${#missing[@]} -gt 0 ]; then
     log_error "Missing dependencies: ${missing[*]}"
@@ -101,7 +152,7 @@ check_dependencies() {
 check_traefik_network() {
   local network="${TRAEFIK_NETWORK:-traefik-proxy}"
 
-  if ! docker network ls --format '{{.Name}}' | grep -q "^${network}$"; then
+  if ! $SUDO docker network ls --format '{{.Name}}' | grep -q "^${network}$"; then
     log_warn "Traefik network '$network' not found."
     log_warn "Make sure Traefik is running or set TRAEFIK_NETWORK."
   else
@@ -110,10 +161,16 @@ check_traefik_network() {
 }
 
 create_directories() {
-  mkdir -p "$INSTALL_DIR"
-  mkdir -p "$INSTALL_DIR"/{postgres-data,forgejo-data,forgejo-config,backups}
-  mkdir -p "$SECRETS_DIR"
-  chmod 700 "$SECRETS_DIR"
+  run_sudo mkdir -p "$INSTALL_DIR"
+  run_sudo mkdir -p "$INSTALL_DIR"/{postgres-data,forgejo-data,forgejo-config,backups}
+  run_sudo mkdir -p "$SECRETS_DIR"
+  run_sudo chmod 700 "$SECRETS_DIR"
+
+  # If using sudo, try to give ownership to current user for install dir
+  if [ -n "$SUDO" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    sudo chown -R "$(id -u):$(id -g)" "$INSTALL_DIR" 2>/dev/null || true
+  fi
+
   log_info "Created directories:"
   log_info "  Install: $INSTALL_DIR"
   log_info "  Secrets: $SECRETS_DIR"
@@ -123,10 +180,15 @@ copy_project_files() {
   log_info "Copying project files..."
 
   # Copy docker-compose.yml
-  cp "$SCRIPT_DIR/docker-compose.yml" "$INSTALL_DIR/"
+  run_sudo cp "$SCRIPT_DIR/docker-compose.yml" "$INSTALL_DIR/"
 
   # Copy scripts
-  cp -r "$SCRIPT_DIR/scripts" "$INSTALL_DIR/"
+  run_sudo cp -r "$SCRIPT_DIR/scripts" "$INSTALL_DIR/"
+
+  # Fix ownership if using sudo
+  if [ -n "$SUDO" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    sudo chown -R "$(id -u):$(id -g)" "$INSTALL_DIR" 2>/dev/null || true
+  fi
 
   log_info "Files copied to $INSTALL_DIR"
 }
@@ -138,11 +200,16 @@ generate_env() {
 
   log_info "Generating .env..."
 
+  # Create temp file for env generation (no sudo needed)
+  local tmp_env
+  tmp_env="$(mktemp)"
+  trap 'rm -f "$tmp_env"' RETURN
+
   # Start with defaults
   if [ -f "$defaults_file" ]; then
-    cp "$defaults_file" "$env_file"
+    cp "$defaults_file" "$tmp_env"
   else
-    touch "$env_file"
+    touch "$tmp_env"
   fi
 
   # Override with local values (if exists)
@@ -154,10 +221,10 @@ generate_env() {
       value="${value%[[:space:]]}"
 
       if [ -n "$key" ]; then
-        if grep -q "^${key}=" "$env_file" 2>/dev/null; then
-          sed -i "s|^${key}=.*|${key}=${value}|" "$env_file"
+        if grep -q "^${key}=" "$tmp_env" 2>/dev/null; then
+          sed -i "s|^${key}=.*|${key}=${value}|" "$tmp_env"
         else
-          echo "${key}=${value}" >> "$env_file"
+          echo "${key}=${value}" >> "$tmp_env"
         fi
       fi
     done < "$local_file"
@@ -165,29 +232,46 @@ generate_env() {
   fi
 
   # Set instance-specific paths
-  sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$INSTALL_DIR|" "$env_file"
-  sed -i "s|^SECRETS_DIR=.*|SECRETS_DIR=$SECRETS_DIR|" "$env_file"
+  sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$INSTALL_DIR|" "$tmp_env"
+  sed -i "s|^SECRETS_DIR=.*|SECRETS_DIR=$SECRETS_DIR|" "$tmp_env"
+
+  # Copy to destination
+  run_sudo cp "$tmp_env" "$env_file"
+
+  # Fix ownership if using sudo
+  if [ -n "$SUDO" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    sudo chown "$(id -u):$(id -g)" "$env_file" 2>/dev/null || true
+  fi
 
   log_info "Generated $env_file"
 }
 
 generate_secrets() {
-  if [ -d "$SECRETS_DIR" ] && [ "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]; then
+  if [ -d "$SECRETS_DIR" ] && [ "$(run_sudo ls -A "$SECRETS_DIR" 2>/dev/null)" ]; then
     log_info "Secrets directory already populated: $SECRETS_DIR"
     return 0
   fi
 
   log_info "Generating secrets in $SECRETS_DIR..."
 
+  # Generate secrets in temp dir first (no sudo needed)
+  local tmp_secrets
+  tmp_secrets="$(mktemp -d)"
+  trap 'rm -rf "$tmp_secrets"' RETURN
+
   generate_random() {
     openssl rand -hex 32
   }
 
-  echo "$(generate_random)" > "$SECRETS_DIR/postgres_password.txt"
-  echo "$(generate_random)" > "$SECRETS_DIR/forgejo_secret_key.txt"
-  echo "$(generate_random)" > "$SECRETS_DIR/forgejo_internal_token.txt"
+  echo "$(generate_random)" > "$tmp_secrets/postgres_password.txt"
+  echo "$(generate_random)" > "$tmp_secrets/forgejo_secret_key.txt"
+  echo "$(generate_random)" > "$tmp_secrets/forgejo_internal_token.txt"
 
-  chmod 600 "$SECRETS_DIR"/*.txt
+  chmod 600 "$tmp_secrets"/*.txt
+
+  # Copy to destination with sudo
+  run_sudo cp "$tmp_secrets"/*.txt "$SECRETS_DIR/"
+  run_sudo chmod 600 "$SECRETS_DIR"/*.txt
 
   log_info "Generated secrets:"
   log_info "  postgres_password.txt"
@@ -222,7 +306,7 @@ main() {
   log_info "Instance: $INSTANCE_KEY"
   echo ""
 
-  check_sudo "$@"
+  init_sudo
   check_dependencies
   check_traefik_network
   create_directories

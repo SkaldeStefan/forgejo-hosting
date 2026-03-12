@@ -31,12 +31,12 @@ Self-hosted Git service with Forgejo, Traefik routing, and Authentik protection.
 The `install.sh` script deploys to production directories:
 
 ```bash
-# Default installation
-sudo ./install.sh
+# Default installation (uses sudo only where needed)
+./install.sh
 
 # Multiple instances
-sudo ./install.sh forgejo-git
-sudo ./install.sh forgejo-internal
+./install.sh forgejo-git
+./install.sh forgejo-internal
 ```
 
 **Directory structure after install:**
@@ -64,9 +64,9 @@ sudo ./install.sh forgejo-internal
    # Edit FORGEJO_DOMAIN and other settings
    ```
 
-2. **Run installer**:
+2. **Run installer** (uses sudo only where needed):
    ```bash
-   sudo ./install.sh
+   ./install.sh
    ```
 
 3. **Edit configuration** (if needed):
