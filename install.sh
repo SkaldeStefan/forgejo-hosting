@@ -231,9 +231,18 @@ generate_env() {
     log_info "Merged .env.local into .env"
   fi
 
-  # Set instance-specific paths
-  sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$INSTALL_DIR|" "$tmp_env"
-  sed -i "s|^SECRETS_DIR=.*|SECRETS_DIR=$SECRETS_DIR|" "$tmp_env"
+  # Set instance-specific paths (add if not exists)
+  if grep -q "^PROJECT_DIR=" "$tmp_env" 2>/dev/null; then
+    sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$INSTALL_DIR|" "$tmp_env"
+  else
+    echo "PROJECT_DIR=$INSTALL_DIR" >> "$tmp_env"
+  fi
+
+  if grep -q "^SECRETS_DIR=" "$tmp_env" 2>/dev/null; then
+    sed -i "s|^SECRETS_DIR=.*|SECRETS_DIR=$SECRETS_DIR|" "$tmp_env"
+  else
+    echo "SECRETS_DIR=$SECRETS_DIR" >> "$tmp_env"
+  fi
 
   # Copy to destination
   run_sudo cp "$tmp_env" "$env_file"
