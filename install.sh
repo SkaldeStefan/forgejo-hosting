@@ -14,6 +14,29 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Check if we need sudo for docker
+check_sudo() {
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    SUDO=()
+    return 0
+  fi
+
+  # Test docker access
+  if docker info &>/dev/null; then
+    SUDO=()
+    return 0
+  fi
+
+  # Need sudo
+  if command -v sudo >/dev/null 2>&1; then
+    log_info "Re-executing with sudo for Docker access..."
+    exec sudo -E "$0" "$@"
+  else
+    log_error "Docker access denied and sudo not available."
+    exit 1
+  fi
+}
+
 check_dependencies() {
   local missing=()
 
@@ -40,18 +63,47 @@ check_traefik_network() {
   fi
 }
 
-setup_env() {
-  if [ -f ".env" ]; then
-    log_info ".env already exists, skipping."
-    return 0
+# Merge .env.local into .env (local overrides defaults)
+merge_env_files() {
+  local env_file=".env"
+  local defaults_file=".env.defaults"
+  local local_file=".env.local"
+
+  # Start with defaults if .env doesn't exist
+  if [ ! -f "$env_file" ]; then
+    if [ -f "$defaults_file" ]; then
+      cp "$defaults_file" "$env_file"
+      log_info "Created .env from .env.defaults"
+    else
+      touch "$env_file"
+      log_info "Created empty .env"
+    fi
+  else
+    log_info ".env already exists"
   fi
 
-  if [ -f ".env.local.example" ]; then
-    cp .env.local.example .env
-    log_info "Created .env from .env.local.example"
-    log_warn "Please edit .env and set FORGEJO_DOMAIN"
-  else
-    log_warn "No .env.local.example found. Please create .env manually."
+  # Merge .env.local into .env (local values override)
+  if [ -f "$local_file" ]; then
+    log_info "Merging .env.local into .env..."
+    while IFS='=' read -r key value || [ -n "$key" ]; do
+      # Skip empty lines and comments
+      [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+      # Trim whitespace
+      key="${key//[[:space:]]/}"
+      value="${value#[[:space:]]}"
+      value="${value%[[:space:]]}"
+
+      if [ -n "$key" ]; then
+        if grep -q "^${key}=" "$env_file" 2>/dev/null; then
+          # Replace existing key
+          sed -i "s|^${key}=.*|${key}=${value}|" "$env_file"
+        else
+          # Append new key
+          echo "${key}=${value}" >> "$env_file"
+        fi
+      fi
+    done < "$local_file"
+    log_info ".env.local merged into .env"
   fi
 }
 
@@ -70,7 +122,7 @@ setup_secrets() {
 }
 
 create_directories() {
-  mkdir -p postgres-data forgejo-data forgejo-config backups
+  mkdir -p postgres-data forgejo-data forgejo-config backups secrets
   log_info "Created data directories."
 }
 
@@ -97,9 +149,10 @@ main() {
   log_info "Forgejo Hosting Installer"
   echo ""
 
+  check_sudo "$@"
   check_dependencies
   check_traefik_network
-  setup_env
+  merge_env_files
   create_directories
   setup_secrets
   show_next_steps

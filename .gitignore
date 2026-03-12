@@ -1,6 +1,7 @@
 # Secrets
 secrets/
 .env
+.env.local
 
 # Data directories
 postgres-data/
