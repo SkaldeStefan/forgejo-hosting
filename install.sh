@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
+# install.sh - Deploy Forgejo hosting to production location
+# Usage: ./install.sh [INSTANCE_KEY]
+#
+# Creates:
+#   /srv/docker/${INSTANCE_KEY}/       - docker-compose.yml, .env, data directories
+#   /etc/docker-secrets/${INSTANCE_KEY}/ - secret files
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+
+# Instance key (allows multiple installations)
+INSTANCE_KEY="${1:-forgejo-git}"
+
+# Target directories
+INSTALL_DIR="${INSTALL_DIR:-/srv/docker/${INSTANCE_KEY}}"
+SECRETS_DIR="${SECRETS_DIR:-/etc/docker-secrets/${INSTANCE_KEY}}"
 
 # Colors
 RED='\033[0;31m'
@@ -14,26 +26,15 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# Check if we need sudo for docker
 check_sudo() {
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    SUDO=()
-    return 0
-  fi
-
-  # Test docker access
-  if docker info &>/dev/null; then
-    SUDO=()
-    return 0
-  fi
-
-  # Need sudo
-  if command -v sudo >/dev/null 2>&1; then
-    log_info "Re-executing with sudo for Docker access..."
-    exec sudo -E "$0" "$@"
-  else
-    log_error "Docker access denied and sudo not available."
-    exit 1
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    if command -v sudo >/dev/null 2>&1; then
+      log_info "Re-executing with sudo..."
+      exec sudo -E INSTALL_DIR="$INSTALL_DIR" SECRETS_DIR="$SECRETS_DIR" "$0" "$@"
+    else
+      log_error "This script must be run as root or with sudo."
+      exit 1
+    fi
   fi
 }
 
@@ -45,7 +46,6 @@ check_dependencies() {
 
   if [ ${#missing[@]} -gt 0 ]; then
     log_error "Missing dependencies: ${missing[*]}"
-    log_error "Please install them and try again."
     exit 1
   fi
 
@@ -57,104 +57,132 @@ check_traefik_network() {
 
   if ! docker network ls --format '{{.Name}}' | grep -q "^${network}$"; then
     log_warn "Traefik network '$network' not found."
-    log_warn "Make sure Traefik is running and the network exists, or set TRAEFIK_NETWORK."
+    log_warn "Make sure Traefik is running or set TRAEFIK_NETWORK."
   else
     log_info "Traefik network '$network' found."
   fi
 }
 
-# Merge .env.local into .env (local overrides defaults)
-merge_env_files() {
-  local env_file=".env"
-  local defaults_file=".env.defaults"
-  local local_file=".env.local"
+create_directories() {
+  mkdir -p "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR"/{postgres-data,forgejo-data,forgejo-config,backups}
+  mkdir -p "$SECRETS_DIR"
+  chmod 700 "$SECRETS_DIR"
+  log_info "Created directories:"
+  log_info "  Install: $INSTALL_DIR"
+  log_info "  Secrets: $SECRETS_DIR"
+}
 
-  # Start with defaults if .env doesn't exist
-  if [ ! -f "$env_file" ]; then
-    if [ -f "$defaults_file" ]; then
-      cp "$defaults_file" "$env_file"
-      log_info "Created .env from .env.defaults"
-    else
-      touch "$env_file"
-      log_info "Created empty .env"
-    fi
+copy_project_files() {
+  log_info "Copying project files..."
+
+  # Copy docker-compose.yml
+  cp "$SCRIPT_DIR/docker-compose.yml" "$INSTALL_DIR/"
+
+  # Copy scripts
+  cp -r "$SCRIPT_DIR/scripts" "$INSTALL_DIR/"
+
+  log_info "Files copied to $INSTALL_DIR"
+}
+
+generate_env() {
+  local env_file="$INSTALL_DIR/.env"
+  local defaults_file="$SCRIPT_DIR/.env.defaults"
+  local local_file="$SCRIPT_DIR/.env.local"
+
+  log_info "Generating .env..."
+
+  # Start with defaults
+  if [ -f "$defaults_file" ]; then
+    cp "$defaults_file" "$env_file"
   else
-    log_info ".env already exists"
+    touch "$env_file"
   fi
 
-  # Merge .env.local into .env (local values override)
+  # Override with local values (if exists)
   if [ -f "$local_file" ]; then
-    log_info "Merging .env.local into .env..."
     while IFS='=' read -r key value || [ -n "$key" ]; do
-      # Skip empty lines and comments
       [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-      # Trim whitespace
       key="${key//[[:space:]]/}"
       value="${value#[[:space:]]}"
       value="${value%[[:space:]]}"
 
       if [ -n "$key" ]; then
         if grep -q "^${key}=" "$env_file" 2>/dev/null; then
-          # Replace existing key
           sed -i "s|^${key}=.*|${key}=${value}|" "$env_file"
         else
-          # Append new key
           echo "${key}=${value}" >> "$env_file"
         fi
       fi
     done < "$local_file"
-    log_info ".env.local merged into .env"
+    log_info "Merged .env.local into .env"
   fi
+
+  # Set instance-specific paths
+  sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$INSTALL_DIR|" "$env_file"
+  sed -i "s|^SECRETS_DIR=.*|SECRETS_DIR=$SECRETS_DIR|" "$env_file"
+
+  log_info "Generated $env_file"
 }
 
-setup_secrets() {
-  if [ -d "secrets" ] && [ "$(ls -A secrets 2>/dev/null)" ]; then
-    log_info "Secrets directory already populated."
+generate_secrets() {
+  if [ -d "$SECRETS_DIR" ] && [ "$(ls -A "$SECRETS_DIR" 2>/dev/null)" ]; then
+    log_info "Secrets directory already populated: $SECRETS_DIR"
     return 0
   fi
 
-  if [ -f "scripts/generate-secrets.sh" ]; then
-    log_info "Generating secrets..."
-    ./scripts/generate-secrets.sh
-  else
-    log_warn "scripts/generate-secrets.sh not found. Create secrets manually."
-  fi
-}
+  log_info "Generating secrets in $SECRETS_DIR..."
 
-create_directories() {
-  mkdir -p postgres-data forgejo-data forgejo-config backups secrets
-  log_info "Created data directories."
+  generate_random() {
+    openssl rand -hex 32
+  }
+
+  echo "$(generate_random)" > "$SECRETS_DIR/postgres_password.txt"
+  echo "$(generate_random)" > "$SECRETS_DIR/forgejo_secret_key.txt"
+  echo "$(generate_random)" > "$SECRETS_DIR/forgejo_internal_token.txt"
+
+  chmod 600 "$SECRETS_DIR"/*.txt
+
+  log_info "Generated secrets:"
+  log_info "  postgres_password.txt"
+  log_info "  forgejo_secret_key.txt"
+  log_info "  forgejo_internal_token.txt"
 }
 
 show_next_steps() {
   echo ""
   echo "======================================"
-  echo "          Next Steps"
+  echo "  Installation complete: $INSTANCE_KEY"
   echo "======================================"
   echo ""
-  echo "1. Edit .env and configure your domain:"
-  echo "   vim .env"
+  echo "Install directory: $INSTALL_DIR"
+  echo "Secrets directory: $SECRETS_DIR"
+  echo ""
+  echo "Next steps:"
+  echo ""
+  echo "1. Edit configuration:"
+  echo "   vim $INSTALL_DIR/.env"
   echo ""
   echo "2. Start Forgejo:"
-  echo "   docker compose up -d"
+  echo "   cd $INSTALL_DIR && docker compose up -d"
   echo ""
   echo "3. Create admin user:"
-  echo "   docker compose exec forgejo forgejo admin user create --admin --username admin --email admin@example.com"
-  echo ""
-  echo "4. Visit https://your-domain and login"
+  echo "   docker compose -f $INSTALL_DIR/docker-compose.yml exec forgejo forgejo admin user create --admin --username admin --email admin@example.com"
   echo ""
 }
 
 main() {
   log_info "Forgejo Hosting Installer"
+  log_info "Instance: $INSTANCE_KEY"
   echo ""
 
   check_sudo "$@"
   check_dependencies
   check_traefik_network
-  merge_env_files
   create_directories
-  setup_secrets
+  copy_project_files
+  generate_env
+  generate_secrets
   show_next_steps
 }
 

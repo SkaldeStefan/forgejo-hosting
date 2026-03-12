@@ -26,25 +26,60 @@ Self-hosted Git service with Forgejo, Traefik routing, and Authentik protection.
 - Traefik proxy (external network)
 - Authentik (optional, for authentication)
 
-## Quick Start
+## Installation
 
-1. **Clone and configure**
+The `install.sh` script deploys to production directories:
+
+```bash
+# Default installation
+sudo ./install.sh
+
+# Multiple instances
+sudo ./install.sh forgejo-git
+sudo ./install.sh forgejo-internal
+```
+
+**Directory structure after install:**
+```
+/srv/docker/forgejo-git/          # Instance directory
+├── docker-compose.yml
+├── .env                          # Generated config (no secrets)
+├── postgres-data/
+├── forgejo-data/
+├── forgejo-config/
+├── backups/
+└── scripts/
+
+/etc/docker-secrets/forgejo-git/  # Secrets (chmod 700)
+├── postgres_password.txt
+├── forgejo_secret_key.txt
+└── forgejo_internal_token.txt
+```
+
+### Quick Start
+
+1. **Create `.env.local` in repo** (optional, for overrides):
    ```bash
-   cp .env.local.example .env
-   # Edit .env and set FORGEJO_DOMAIN
+   cp .env.local.example .env.local
+   # Edit FORGEJO_DOMAIN and other settings
    ```
 
-2. **Generate secrets**
+2. **Run installer**:
    ```bash
-   ./scripts/generate-secrets.sh
+   sudo ./install.sh
    ```
 
-3. **Start services**
+3. **Edit configuration** (if needed):
    ```bash
-   docker compose up -d
+   vim /srv/docker/forgejo-git/.env
    ```
 
-4. **Create admin user**
+4. **Start services**:
+   ```bash
+   cd /srv/docker/forgejo-git && docker compose up -d
+   ```
+
+5. **Create admin user**:
    ```bash
    docker compose exec forgejo forgejo admin user create --admin --username admin --email admin@example.com
    ```
@@ -99,30 +134,29 @@ Backups include:
 - Forgejo data directory
 - Forgejo config directory
 
-## Directory Structure
+## Repository Structure
 
 ```
 .
 ├── docker-compose.yml      # Main compose file
 ├── .env.defaults           # Default configuration
-├── .env                    # Local configuration (not in git)
-├── scripts/
-│   ├── generate-secrets.sh # Generate initial secrets
-│   ├── backup.sh           # Create backups
-│   └── restore.sh          # Restore from backup
-├── secrets/                # Secret files (not in git)
-├── postgres-data/          # PostgreSQL data
-├── forgejo-data/           # Forgejo data (repos, etc.)
-└── forgejo-config/         # Forgejo configuration
+├── .env.local.example      # Local overrides template
+├── .env.local              # Your local config (not in git)
+├── install.sh              # Deployment script
+└── scripts/
+    ├── backup.sh           # Create backups
+    └── restore.sh          # Restore from backup
 ```
 
 ## Upgrading
 
 ```bash
-# Pull new image
-docker compose pull forgejo
+# Re-run installer to update files
+sudo ./install.sh
 
-# Restart with new version
+# Pull new image and restart
+cd /srv/docker/forgejo-git
+docker compose pull forgejo
 docker compose up -d forgejo
 ```
 
