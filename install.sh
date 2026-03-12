@@ -260,7 +260,7 @@ generate_secrets() {
   trap 'rm -rf "$tmp_secrets"' RETURN
 
   generate_random() {
-    openssl rand -hex 32
+    openssl rand -base64 48 | tr -dc 'A-Za-z0-9!@#$%^&*()_+-=' | head -c 24
   }
 
   echo "$(generate_random)" > "$tmp_secrets/postgres_password.txt"
